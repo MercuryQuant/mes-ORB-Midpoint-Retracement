@@ -1,1 +1,164 @@
+//@version=5
+strategy(
+     "ORB Midpoint (Close Trigger + EOD Exit)",
+     overlay = true,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1,
+     currency = currency.USD
+)
+
+// ==========================================
+// 1. INPUTS
+// ==========================================
+
+// ORB Session (New York Time)
+orbSession = input.session("0930-1000", "ORB Session (NY Time)")
+timezone   = "America/New_York"
+
+// Risk Management
+slBuffer          = input.float(3.0, "Stop Loss Buffer (Points)")
+takeProfitPoints = input.float(15.0, "Take Profit (Points)")
+maxTrades         = input.int(3, "Max Trades Per Day")
+
+// ==========================================
+// 2. VARIABLES (Persistent)
+// ==========================================
+var float orbHigh = na
+var float orbLow  = na
+var float orbMid  = na
+
+var string bias      = "None"   // Long | Short | None
+var bool   invalidated = false
+var int    tradesToday = 0
+
+// ==========================================
+// 3. TIME LOGIC
+// ==========================================
+
+// ORB Session Check
+isInSession = not na(time(timeframe.period, orbSession + ":1234567", timezone))
+
+// New Trading Day
+isNewDay = ta.change(time("D", timezone))
+
+// End of Day (15:45 NY onwards)
+nyHour   = hour(time, timezone)
+nyMinute = minute(time, timezone)
+isEndOfDay = (nyHour == 15 and nyMinute >= 45) or nyHour >= 16
+
+// ==========================================
+// 4. DAILY RESET
+// ==========================================
+if isNewDay
+    orbHigh     := na
+    orbLow      := na
+    orbMid      := na
+    bias        := "None"
+    invalidated := false
+    tradesToday := 0
+    strategy.cancel_all()
+
+// Track number of entries (not exits)
+if strategy.opentrades > strategy.opentrades[1]
+    tradesToday += 1
+
+// ==========================================
+// 5. ORB RANGE CALCULATION (09:30–10:00)
+// ==========================================
+if isInSession
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+    orbMid  := math.avg(orbHigh, orbLow)
+
+// ==========================================
+// 6. FORCE END-OF-DAY EXIT (Highest Priority)
+// ==========================================
+if isEndOfDay
+    strategy.close_all(comment = "EOD Exit")
+    strategy.cancel_all()
+
+// ==========================================
+// 7. STRATEGY LOGIC (Post-ORB)
+// ==========================================
+else if not isInSession and not na(orbHigh) and not invalidated
+
+    // --------------------------------------
+    // A. DETERMINE BIAS (CLOSE CONFIRMATION)
+    // --------------------------------------
+    if bias == "None"
+        if close > orbHigh
+            bias := "Long"
+        else if close < orbLow
+            bias := "Short"
+
+    // --------------------------------------
+    // B. INVALIDATION (RANGE FAILURE)
+// --------------------------------------
+    if low <= orbLow - slBuffer or high >= orbHigh + slBuffer
+        invalidated := true
+        strategy.close_all(comment = "Invalidated")
+        strategy.cancel_all()
+
+    // --------------------------------------
+    // C. ENTRY EXECUTION (MIDPOINT RETEST)
+    // --------------------------------------
+    if not invalidated and tradesToday < maxTrades and strategy.position_size == 0
+
+        if bias == "Long"
+            strategy.entry(
+                id = "Long Entry",
+                direction = strategy.long,
+                limit = orbMid
+            )
+
+        if bias == "Short"
+            strategy.entry(
+                id = "Short Entry",
+                direction = strategy.short,
+                limit = orbMid
+            )
+
+
+// ==========================================
+// 8. EXIT LOGIC (SL / TP)
+// ==========================================
+if not isEndOfDay and not na(orbHigh) and not na(orbLow)
+
+    if strategy.position_size > 0
+        stopLong = orbLow - slBuffer
+        strategy.exit(
+            "Long Exit",
+            "Long Entry",
+            stop  = stopLong,
+            limit = orbMid + takeProfitPoints
+        )
+
+    if strategy.position_size < 0
+        stopShort = orbHigh + slBuffer
+        strategy.exit(
+            "Short Exit",
+            "Short Entry",
+            stop  = stopShort,
+            limit = orbMid - takeProfitPoints
+        )
+
+// ==========================================
+// 9. VISUALS
+// ==========================================
+plotColor =
+     invalidated ? color.gray :
+     bias == "Long"  ? color.green :
+     bias == "Short" ? color.red :
+     color.blue
+
+plot(not isInSession ? orbHigh : na, "ORB High", color = plotColor, style = plot.style_linebr)
+plot(not isInSession ? orbLow  : na, "ORB Low",  color = plotColor, style = plot.style_linebr)
+plot(not isInSession ? orbMid  : na, "ORB Mid",  color = plotColor, linewidth = 2)
+
+plot(not isInSession and bias == "Long"  ? orbLow  - slBuffer : na, "Long SL",  color = color.red, style = plot.style_circles)
+plot(not isInSession and bias == "Short" ? orbHigh + slBuffer : na, "Short SL", color = color.red, style = plot.style_circles)
+
+bgcolor(isInSession   ? color.new(color.blue, 90)  : na)
+bgcolor(invalidated  ? color.new(color.red,  90)  : na)
+bgcolor(isEndOfDay   ? color.new(color.black, 85) : na)
 
